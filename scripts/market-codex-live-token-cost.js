@@ -30,6 +30,7 @@
   const BALANCE_REFRESH_INTERVAL_MS = 60 * 1000;
   const HIDE_TURN_COST_KEY = "__codexLiveTokenCostHideTurnCostV1";
   const HIDE_SESSION_COST_KEY = "__codexLiveTokenCostHideSessionCostV1";
+  const IMAGE_BRIDGE_ENABLED_KEY = "__codexLiveTokenCostImageBridgeEnabledV1";
   const PROFILE_GATE_ID = "2478676115";
   const PROFILE_USAGE_QUERY_KEY = ["profile", "usage"];
   const LOCAL_PROFILE_ACCOUNT_ID = "local-profile-account";
@@ -4596,6 +4597,12 @@
       render(true);
       return;
     }
+    const imageBridgeCheckbox = event.target.closest?.("[data-misc-field='imageBridgeEnabled']");
+    if (imageBridgeCheckbox) {
+      saveImageBridgeEnabled(Boolean(imageBridgeCheckbox.checked));
+      renderSettingsOverlay(liveSnapshot());
+      return;
+    }
     const hideSessionCheckbox = event.target.closest?.("[data-misc-field='hideSessionCost']");
     if (hideSessionCheckbox) {
       saveHideSessionCost(Boolean(hideSessionCheckbox.checked));
@@ -5274,6 +5281,67 @@
     }
   }
 
+  // --- Image Bridge: convert image_url blocks to text for non-vision models ---
+  function imageBridgeEnabled() {
+    try { return localStorage.getItem(IMAGE_BRIDGE_ENABLED_KEY) === "true"; } catch (e) { return false; }
+  }
+
+  function saveImageBridgeEnabled(v) {
+    try { localStorage.setItem(IMAGE_BRIDGE_ENABLED_KEY, v ? "true" : "false"); } catch (e) {}
+  }
+
+  function bridgeRequestImages(bodyText) {
+    if (!imageBridgeEnabled()) return bodyText;
+    if (!bodyText || typeof bodyText !== "string") return bodyText;
+    var parsed;
+    try { parsed = JSON.parse(bodyText); } catch (e) { return bodyText; }
+    if (!parsed || !parsed.messages || !Array.isArray(parsed.messages)) return bodyText;
+    var modified = false;
+    var imageCount = 0;
+    var newMessages = parsed.messages.map(function(msg) {
+      if (!msg || !Array.isArray(msg.content)) return msg;
+      var newContent = [];
+      var hasImage = false;
+      for (var i = 0; i < msg.content.length; i++) {
+        var block = msg.content[i];
+        if (block && block.type === "image_url" && block.image_url && block.image_url.url) {
+          hasImage = true;
+          imageCount++;
+          var url = block.image_url.url;
+          var detail = block.image_url.detail || "auto";
+          // Extract info from data URL
+          var info = "";
+          if (typeof url === "string") {
+            var m = url.match(/^data:image\/([^;]+);base64,(.+)$/i);
+            if (m) {
+              var fmt = m[1];
+              var sizeKB = Math.round(m[2].length * 0.75 / 1024);
+              info = fmt + ", " + sizeKB + "KB";
+            } else if (url.startsWith("http")) {
+              info = "remote URL";
+            } else if (url.startsWith("file://")) {
+              info = "local file: " + url.replace("file://", "");
+            } else {
+              info = "inline data";
+            }
+          }
+          // Replace image with text block containing image data reference
+          newContent.push({ type: "text", text: "[??????? (" + info + ", detail: " + detail + ")?????: " + url.substring(0, 200) + "...(??)]" });
+          modified = true;
+        } else {
+          newContent.push(block);
+        }
+      }
+      if (hasImage) {
+        // Add a guidance text for the model
+        newContent.unshift({ type: "text", text: "[????: ????????????????????????????????????????? base64 ????????????]" });
+      }
+      return Object.assign({}, msg, { content: newContent });
+    });
+    if (!modified) return bodyText;
+    try { return JSON.stringify(Object.assign({}, parsed, { messages: newMessages })); } catch (e) { return bodyText; }
+  }
+
   function installLocalFetchCapture() {
     if (typeof window.fetch !== "function" || window.fetch.__codexLiveTokenCostWrapped === VERSION) return;
     const originalFetch = window.fetch.__codexLiveTokenCostOriginal || window.fetch;
@@ -5293,6 +5361,16 @@
           inspectLocalPayload(init?.body, "fetch-body");
         } catch {
           // Keep page fetch behavior untouched.
+        }
+        // Bridge images for non-vision models (DeepSeek)
+        if (imageBridgeEnabled() && init && typeof init.body === "string") {
+          var bridged = bridgeRequestImages(init.body);
+          if (bridged !== init.body) {
+            init = Object.assign({}, init, { body: bridged });
+            if (input instanceof Request) {
+              input = new Request(input.url, Object.assign({}, input, { method: input.method, headers: input.headers, body: bridged }));
+            }
+          }
         }
       }
       const response = await originalFetch.call(this, input, init);
