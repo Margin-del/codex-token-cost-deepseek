@@ -234,6 +234,10 @@
 
   function deepseekPeakMultiplier(model) {
     if (!model || !DEEPSEEK_MODEL_PATTERN.test(String(model))) return 1;
+    // Peak pricing starts mid-July 2026
+    var now = new Date();
+    var peakStart = new Date(Date.UTC(2026, 6, 15)); // July 15, 2026 UTC
+    if (now < peakStart) return 1;
     return isDeepSeekPeakTime() ? 2 : 1;
   }
 
